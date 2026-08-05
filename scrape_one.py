@@ -7,24 +7,9 @@ from playwright.async_api import async_playwright
 
 # 去重後嘅唯一航線 (origin_code, origin_keyword, dest_code, dest_keyword)
 ROUTES = [
-    ("VNSGN", "VUNG TAU", "NOTAE", "TANANGER"),
-    ("VNSGN", "HO CHI MINH", "GBFXT", "FELIXSTOWE"),
-    ("VNSGN", "HO CHI MINH", "NLRTM", "ROTTERDAM"),
-    ("CNTAO", "QINGDAO", "ITSPE", "LA SPEZIA"),
-    ("CNTAO", "QINGDAO", "ITGOA", "GENOA"),
-    ("CNTAO", "QINGDAO", "ESVLC", "VALENCIA"),
-    ("CNTAO", "QINGDAO", "GBLGP", "LONDON GATEWAY"),
-    ("CNDLC", "DALIAN", "ITGOA", "GENOA"),
-    ("CNWUH", "WUHAN", "ITGOA", "GENOA"),
-    ("CNWUH", "WUHAN", "BEANR", "ANTWERP"),
-    ("CNWUH", "WUHAN", "GBLGP", "LONDON GATEWAY"),
-    ("CNCKG", "CHONGQING", "ITGOA", "GENOA"),
-    ("CNCKG", "CHONGQING", "GBLGP", "LONDON GATEWAY"),
-    ("CNSHA", "SHANGHAI", "ROCND", "CONSTANTA"),
-    ("CNSHA", "SHANGHAI", "ITAOI", "ANCONA"),
-    ("CNSHA", "SHANGHAI", "ITGOA", "GENOA"),
-    ("CNSHA", "SHANGHAI", "ITVCE", "VENICE"),
-    ("CNSHA", "SHANGHAI", "ESBCN", "BARCELONA"),
+    ("HKHKG", "HONG KONG", "SEGOT", "GOTHENBURG"),
+    ("HKHKG", "HONG KONG", "NOOSL", "OSLO"),
+    ("VNSGN", "HO CHI MINH", "NOTAE", "TANANGER"),
 ]
 
 OUTPUT_DIR = Path("output")
