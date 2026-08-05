@@ -5,7 +5,6 @@ from pathlib import Path
 import pandas as pd
 import requests
 
-# 去重後航線 (porCode, delCode)
 ROUTES = [
     ("HKHKG", "SEGOT"),
     ("HKHKG", "NOOSL"),
@@ -29,101 +28,93 @@ HEADERS = {
 }
 
 
-def fetch_schedule(por_code: str, del_code: str, from_date: str, to_date: str) -> list[dict]:
-    """查一條航線，返回整理後 rows。"""
+def empty_row(por, dest, vessel_msg, scraped_at):
+    return {
+        "Route": f"{por}→{dest}",
+        "OriginCode": por,
+        "DestCode": dest,
+        "POL": "",
+        "ETD": "",
+        "Service": "",
+        "Vessel": vessel_msg,
+        "Voyage": "",
+        "POD": "",
+        "ETA": "",
+        "TransitDays": "",
+        "Transshipment": "",
+        "ScrapedAt": scraped_at,
+    }
+
+
+def fetch_schedule(por_code, del_code, from_date, to_date):
     route = f"{por_code}→{del_code}"
     scraped_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-
     params = {
         "porCode": por_code,
         "delCode": del_code,
         "fromDate": from_date,
         "toDate": to_date,
-        "rcvTermCode": "Y",  # CY
-        "deTermCode": "Y",   # CY
-        "tsFlag": "",        # All (direct + transshipment)
+        "rcvTermCode": "Y",
+        "deTermCode": "Y",
+        "tsFlag": "",
     }
 
-    try:
-        r = requests.get(API_URL, params=params, headers=HEADERS, timeout=60)
-        if r.status_code == 429:
-            print(f"  rate limited，等 10 秒再試: {route}")
-            time.sleep(10)
+    data = None
+    last_err = None
+    for attempt in range(3):
+        try:
             r = requests.get(API_URL, params=params, headers=HEADERS, timeout=60)
+            if r.status_code == 429:
+                print(f"  429 rate limit，等 {5 * (attempt + 1)} 秒...")
+                time.sleep(5 * (attempt + 1))
+                continue
+            r.raise_for_status()
+            data = r.json()
+            break
+        except Exception as e:
+            last_err = e
+            print(f"  attempt {attempt + 1} 失敗: {e}")
+            time.sleep(3)
 
-        r.raise_for_status()
-        data = r.json()
-    except Exception as e:
-        print(f"  錯誤 {route}: {e}")
-        return [{
-            "Route": route,
-            "OriginCode": por_code,
-            "DestCode": del_code,
-            "POL": "",
-            "ETD": "",
-            "Service": "",
-            "Vessel": f"(Error: {e})",
-            "Voyage": "",
-            "POD": "",
-            "ETA": "",
-            "TransitDays": "",
-            "Transshipment": "",
-            "ScrapedAt": scraped_at,
-        }]
+    if data is None:
+        return [empty_row(por_code, del_code, f"(Error: {last_err})", scraped_at)]
 
     lines = data.get("scheduleLines") or []
     if not lines:
-        return [{
-            "Route": route,
-            "OriginCode": por_code,
-            "DestCode": del_code,
-            "POL": "",
-            "ETD": "",
-            "Service": "",
-            "Vessel": "(No schedule found)",
-            "Voyage": "",
-            "POD": "",
-            "ETA": "",
-            "TransitDays": "",
-            "Transshipment": "",
-            "ScrapedAt": scraped_at,
-        }]
+        return [empty_row(por_code, del_code, "(No schedule found)", scraped_at)]
 
     rows = []
     for line in lines:
-        # 主航段資料
         pol = line.get("polName") or line.get("porName") or ""
         etd = line.get("polDepartureDate") or line.get("porDepartureDate") or ""
         pod = line.get("podName") or line.get("delName") or ""
         eta = line.get("podArrivalDate") or line.get("delArrivalDate") or ""
         transit = line.get("displayTransitDays") or line.get("oceanTransitTime") or ""
         ts_type = line.get("transshipmentType") or ""
-        ts_count = line.get("totalTransshipment") or ""
+        ts_count = line.get("totalTransshipment")
         trunk = line.get("trunkVvd") or ""
 
-        # journeys 有更細 vessel 資料；無就用 trunkVvd
         journeys = line.get("journeys") or []
         if journeys:
-            # 取第一段（起運）同最後一段（到目的）資訊
             first = journeys[0]
             last = journeys[-1]
             vessel = first.get("vsslName") or first.get("vesselName") or ""
             voyage = first.get("vesselName") or first.get("vesselCode") or trunk
             service = first.get("serviceLane") or ""
-            if not etd:
-                etd = first.get("departureDate") or ""
-            if not eta:
-                eta = last.get("berthingDate") or last.get("arrivalDate") or ""
-            if not pol:
-                pol = first.get("polName") or first.get("polLocationName") or ""
-            if not pod:
-                pod = last.get("podName") or last.get("podLocationName") or ""
-            if not transit:
-                transit = line.get("totalTransitTime") or first.get("transitTime") or ""
+            etd = etd or first.get("departureDate") or ""
+            eta = eta or last.get("berthingDate") or last.get("arrivalDate") or ""
+            pol = pol or first.get("polName") or first.get("polLocationName") or ""
+            pod = pod or last.get("podName") or last.get("podLocationName") or ""
+            transit = transit or first.get("transitTime") or ""
         else:
             vessel = trunk
             voyage = trunk
             service = ""
+
+        if ts_count is not None and str(ts_count) != "":
+            ts_text = f"{ts_type} ({ts_count})".strip()
+        else:
+            ts_text = str(ts_type)
 
         rows.append({
             "Route": route,
@@ -137,7 +128,7 @@ def fetch_schedule(por_code: str, del_code: str, from_date: str, to_date: str) -
             "POD": pod,
             "ETA": eta,
             "TransitDays": str(transit).replace(" day(s)", "").replace("days", "").strip(),
-            "Transshipment": f"{ts_type} ({ts_count})" if ts_count != "" else str(ts_type),
+            "Transshipment": ts_text,
             "ScrapedAt": scraped_at,
         })
 
@@ -155,7 +146,7 @@ def main():
         rows = fetch_schedule(por, dest, from_date, to_date)
         print(f"  → {len(rows)} 行")
         all_rows.extend(rows)
-        time.sleep(2)  # 避免 429
+        time.sleep(3)
 
     df = pd.DataFrame(all_rows)
     cols = [
