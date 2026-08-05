@@ -1,0 +1,49 @@
+name: 每日船期更新（ESL + ONE）
+
+on:
+  schedule:
+    - cron: "0 0 * * *"   # 每日 UTC 00:00 ≈ 香港 08:00
+  workflow_dispatch:
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          playwright install chromium
+          playwright install-deps chromium
+
+      - name: Run ESL scraper
+        run: python scrape_esl.py
+        continue-on-error: true
+
+      - name: Run ONE scraper
+        run: python scrape_one.py
+
+      - name: Upload Excel artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: schedules-xlsx
+          path: output/*.xlsx
+          retention-days: 30
+
+      - name: Commit Excel results
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          mkdir -p output
+          git add output/*.xlsx || true
+          git diff --staged --quiet || git commit -m "chore: update schedules $(date -u +%Y-%m-%d)"
+          git push
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
