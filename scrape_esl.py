@@ -40,45 +40,77 @@ async def scrape_route(page, origin_kw, origin_code, dest_kw, dest_code):
     await page.goto("https://www.emiratesline.com/schedule-search/", wait_until="domcontentloaded")
     await page.wait_for_timeout(2500)
 
-    # 有機會出現 captcha，留少少時間
-    await page.wait_for_timeout(1500)
-
     await fill_port(page, "originPort", origin_kw)
     await fill_port(page, "destinationPort", dest_kw)
 
-    # 撳 Search（注意網站 button name 有 typo）
-    btn = page.locator("button[name='scheudle-search']")
-    await btn.click()
+    await page.locator("button[name='scheudle-search']").click()
     await page.wait_for_timeout(4500)
 
+    scraped_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     rows = []
+    seen = set()
+
     tables = page.locator("table")
     count = await tables.count()
 
     for i in range(count):
         table = tables.nth(i)
-        text = await table.inner_text()
-        if "Departure" not in text and "Port Of Loading" not in text and "ETD" not in text:
-            continue
-
         trs = table.locator("tr")
         tr_count = await trs.count()
+
         for r in range(tr_count):
-            line = (await trs.nth(r).inner_text()).strip()
-            if not line or "Departure" in line or "Port Of Loading" in line:
+            cells = trs.nth(r).locator("td")
+            cell_count = await cells.count()
+            if cell_count < 6:
                 continue
-            # 簡單整行保存，之後可以再拆欄
+
+            vals = []
+            for c in range(cell_count):
+                vals.append((await cells.nth(c).inner_text()).strip())
+
+            # 預期: POL | ETD | Service | Vessel | Voyage | POD | ETA | Transit
+            if len(vals) >= 8:
+                pol, etd, service, vessel, voyage, pod, eta, transit = vals[:8]
+            elif len(vals) >= 7:
+                pol, etd, service, vessel, voyage, pod, eta = vals[:7]
+                transit = ""
+            else:
+                continue
+
+            # 過濾表頭
+            if pol.lower() in ("port of loading", "departure", "pol") or not pol:
+                continue
+
+            key = (pol, etd, vessel, voyage, pod, eta)
+            if key in seen:
+                continue
+            seen.add(key)
+
             rows.append({
-                "route": route_name,
-                "raw": line.replace("\n", " | "),
-                "scraped_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
+                "Route": route_name,
+                "POL": pol,
+                "ETD": etd,
+                "Service": service,
+                "Vessel": vessel,
+                "Voyage": voyage,
+                "POD": pod,
+                "ETA": eta,
+                "TransitDays": transit.replace(" days", "").replace("days", "").strip(),
+                "ScrapedAt": scraped_at,
             })
 
     if not rows:
         rows.append({
-            "route": route_name,
-            "raw": "(No schedule found)",
-            "scraped_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
+            "Route": route_name,
+            "POL": "",
+            "ETD": "",
+            "Service": "",
+            "Vessel": "(No schedule found)",
+            "Voyage": "",
+            "POD": "",
+            "ETA": "",
+            "TransitDays": "",
+            "ScrapedAt": scraped_at,
         })
 
     print(f"  → {len(rows)} 行")
@@ -115,20 +147,24 @@ async def main():
         await browser.close()
 
     df = pd.DataFrame(all_rows)
+
+    # 欄位順序
+    cols = ["Route", "POL", "ETD", "Service", "Vessel", "Voyage", "POD", "ETA", "TransitDays", "ScrapedAt"]
+    for c in cols:
+        if c not in df.columns:
+            df[c] = ""
+    df = df[cols]
+
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    csv_path = OUTPUT_DIR / f"esl_schedules_{today}.csv"
-    xlsx_path = OUTPUT_DIR / f"esl_schedules_{today}.xlsx"
+    dated_path = OUTPUT_DIR / f"esl_schedules_{today}.xlsx"
+    latest_path = OUTPUT_DIR / "esl_schedules_latest.xlsx"
 
-    df.to_csv(csv_path, index=False, encoding="utf-8-sig")
-    df.to_excel(xlsx_path, index=False)
-
-    # 同時寫一份 latest，方便查看
-    df.to_csv(OUTPUT_DIR / "esl_schedules_latest.csv", index=False, encoding="utf-8-sig")
-    df.to_excel(OUTPUT_DIR / "esl_schedules_latest.xlsx", index=False)
+    df.to_excel(dated_path, index=False)
+    df.to_excel(latest_path, index=False)
 
     print(f"\n完成，共 {len(df)} 行")
-    print(f"已儲存: {csv_path}")
-    print(f"已儲存: {xlsx_path}")
+    print(f"已儲存: {dated_path}")
+    print(f"已儲存: {latest_path}")
 
 
 if __name__ == "__main__":
