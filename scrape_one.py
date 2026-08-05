@@ -1,256 +1,189 @@
-import asyncio
-from datetime import datetime, timezone
+import time
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pandas as pd
-from playwright.async_api import async_playwright
+import requests
 
-# 去重後唯一航線: (origin_code, origin_keyword, dest_code, dest_keyword)
-# autocomplete 會優先選 (CY)
+# 去重後航線 (porCode, delCode)
 ROUTES = [
-    ("HKHKG", "HONG KONG", "SEGOT", "GOTHENBURG"),
-    ("HKHKG", "HONG KONG", "NOOSL", "OSLO"),
-    ("VNSGN", "HO CHI MINH", "NOTAE", "TANANGER"),
-    ("CNTAO", "QINGDAO", "ITSPE", "LA SPEZIA"),
+    ("VNSGN", "NOTAE"),
+    ("VNSGN", "GBFXT"),
+    ("VNSGN", "NLRTM"),
+    ("CNTAO", "ITSPE"),
+    ("CNTAO", "ITGOA"),
+    ("CNTAO", "ESVLC"),
+    ("CNTAO", "GBLGP"),
+    ("CNDLC", "ITGOA"),
+    ("CNWUH", "ITGOA"),
+    ("CNWUH", "BEANR"),
+    ("CNWUH", "GBLGP"),
+    ("CNCKG", "ITGOA"),
+    ("CNCKG", "GBLGP"),
+    ("CNSHA", "ROCND"),
+    ("CNSHA", "ITAOI"),
+    ("CNSHA", "ITGOA"),
+    ("CNSHA", "ITVCE"),
+    ("CNSHA", "ESBCN"),
 ]
 
+API_URL = "https://ecomm.one-line.com/api/v1/schedule/point-to-point"
 OUTPUT_DIR = Path("output")
 OUTPUT_DIR.mkdir(exist_ok=True)
-URL = "https://ecomm.one-line.com/one-ecom/schedule/point-to-point-schedule"
+
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/json, text/plain, */*",
+    "Referer": "https://ecomm.one-line.com/one-ecom/schedule/point-to-point-schedule",
+    "Origin": "https://ecomm.one-line.com",
+}
 
 
-async def dismiss_cookies(page):
-    for text in ["Accept", "Accept All", "Agree", "I Agree", "Allow all"]:
-        try:
-            btn = page.get_by_role("button", name=text)
-            if await btn.count() > 0:
-                await btn.first.click()
-                await page.wait_for_timeout(500)
-                return
-        except Exception:
-            pass
-
-
-async def fill_port(page, which: str, keyword: str):
-    """
-    which: "origin" / "destination"
-    優先選 (CY)，避免 (DOOR)
-    """
-    # ONE 頁面常見係 From / To
-    if which == "origin":
-        locator = page.get_by_placeholder("From")
-        if await locator.count() == 0:
-            locator = page.locator("input").nth(0)
-    else:
-        locator = page.get_by_placeholder("To")
-        if await locator.count() == 0:
-            locator = page.locator("input").nth(1)
-
-    el = locator.first
-    await el.click()
-    await el.fill("")
-    await el.type(keyword, delay=50)
-    await page.wait_for_timeout(1500)
-
-    # 優先撳 (CY)
-    try:
-        cy = page.locator("text=/(CY)/i")
-        if await cy.count() > 0:
-            await cy.first.click()
-            await page.wait_for_timeout(400)
-            return
-    except Exception:
-        pass
-
-    await el.press("ArrowDown")
-    await page.wait_for_timeout(300)
-    await el.press("Enter")
-    await page.wait_for_timeout(400)
-
-
-async def scrape_route(page, origin_code, origin_kw, dest_code, dest_kw):
-    route = f"{origin_code}→{dest_code}"
-    print(f"查詢: {route} ({origin_kw} → {dest_kw})")
+def fetch_schedule(por_code: str, del_code: str, from_date: str, to_date: str) -> list[dict]:
+    """查一條航線，返回整理後 rows。"""
+    route = f"{por_code}→{del_code}"
     scraped_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
-    await page.goto(URL, wait_until="domcontentloaded", timeout=60000)
-    await page.wait_for_timeout(3000)
-    await dismiss_cookies(page)
+    params = {
+        "porCode": por_code,
+        "delCode": del_code,
+        "fromDate": from_date,
+        "toDate": to_date,
+        "rcvTermCode": "Y",  # CY
+        "deTermCode": "Y",   # CY
+        "tsFlag": "",        # All (direct + transshipment)
+    }
 
     try:
-        await fill_port(page, "origin", origin_kw)
-        await fill_port(page, "destination", dest_kw)
+        r = requests.get(API_URL, params=params, headers=HEADERS, timeout=60)
+        if r.status_code == 429:
+            print(f"  rate limited，等 10 秒再試: {route}")
+            time.sleep(10)
+            r = requests.get(API_URL, params=params, headers=HEADERS, timeout=60)
+
+        r.raise_for_status()
+        data = r.json()
     except Exception as e:
-        print(f"  輸入港口失敗: {e}")
+        print(f"  錯誤 {route}: {e}")
         return [{
             "Route": route,
-            "OriginCode": origin_code,
-            "DestCode": dest_code,
+            "OriginCode": por_code,
+            "DestCode": del_code,
             "POL": "",
             "ETD": "",
             "Service": "",
-            "Vessel": "",
+            "Vessel": f"(Error: {e})",
             "Voyage": "",
             "POD": "",
             "ETA": "",
             "TransitDays": "",
-            "Raw": f"(Input error: {e})",
+            "Transshipment": "",
             "ScrapedAt": scraped_at,
         }]
 
-    # Search
-    try:
-        btn = page.get_by_role("button", name="Search")
-        if await btn.count() == 0:
-            btn = page.locator("button:has-text('Search')")
-        await btn.first.click()
-    except Exception as e:
-        print(f"  撳 Search 失敗: {e}")
-
-    await page.wait_for_timeout(7000)
+    lines = data.get("scheduleLines") or []
+    if not lines:
+        return [{
+            "Route": route,
+            "OriginCode": por_code,
+            "DestCode": del_code,
+            "POL": "",
+            "ETD": "",
+            "Service": "",
+            "Vessel": "(No schedule found)",
+            "Voyage": "",
+            "POD": "",
+            "ETA": "",
+            "TransitDays": "",
+            "Transshipment": "",
+            "ScrapedAt": scraped_at,
+        }]
 
     rows = []
-    seen = set()
+    for line in lines:
+        # 主航段資料
+        pol = line.get("polName") or line.get("porName") or ""
+        etd = line.get("polDepartureDate") or line.get("porDepartureDate") or ""
+        pod = line.get("podName") or line.get("delName") or ""
+        eta = line.get("podArrivalDate") or line.get("delArrivalDate") or ""
+        transit = line.get("displayTransitDays") or line.get("oceanTransitTime") or ""
+        ts_type = line.get("transshipmentType") or ""
+        ts_count = line.get("totalTransshipment") or ""
+        trunk = line.get("trunkVvd") or ""
 
-    # 優先解析 table
-    tables = page.locator("table")
-    tcount = await tables.count()
-    for i in range(tcount):
-        trs = tables.nth(i).locator("tr")
-        rcount = await trs.count()
-        for r in range(rcount):
-            tds = trs.nth(r).locator("td")
-            ccount = await tds.count()
-            if ccount < 3:
-                continue
-
-            vals = []
-            for c in range(ccount):
-                vals.append((await tds.nth(c).inner_text()).strip().replace("\n", " "))
-
-            line = " | ".join(vals)
-            if not line:
-                continue
-            if "Vessel" in line and ("ETD" in line or "Departure" in line):
-                continue
-            if line in seen:
-                continue
-            seen.add(line)
-
-            # 盡量對位；對唔到就入 Raw
-            item = {
-                "Route": route,
-                "OriginCode": origin_code,
-                "DestCode": dest_code,
-                "POL": vals[0] if len(vals) > 0 else "",
-                "ETD": vals[1] if len(vals) > 1 else "",
-                "Service": vals[2] if len(vals) > 2 else "",
-                "Vessel": vals[3] if len(vals) > 3 else "",
-                "Voyage": vals[4] if len(vals) > 4 else "",
-                "POD": vals[5] if len(vals) > 5 else "",
-                "ETA": vals[6] if len(vals) > 6 else "",
-                "TransitDays": vals[7] if len(vals) > 7 else "",
-                "Raw": line,
-                "ScrapedAt": scraped_at,
-            }
-            rows.append(item)
-
-    if not rows:
-        body = await page.locator("body").inner_text()
-        body_norm = " ".join(body.split())
-        if any(x in body_norm for x in ["Total 0", "0 results", "No result", "No Result"]):
-            rows.append({
-                "Route": route,
-                "OriginCode": origin_code,
-                "DestCode": dest_code,
-                "POL": origin_kw,
-                "ETD": "",
-                "Service": "",
-                "Vessel": "(No schedule found)",
-                "Voyage": "",
-                "POD": dest_kw,
-                "ETA": "",
-                "TransitDays": "",
-                "Raw": "No schedule found",
-                "ScrapedAt": scraped_at,
-            })
+        # journeys 有更細 vessel 資料；無就用 trunkVvd
+        journeys = line.get("journeys") or []
+        if journeys:
+            # 取第一段（起運）同最後一段（到目的）資訊
+            first = journeys[0]
+            last = journeys[-1]
+            vessel = first.get("vsslName") or first.get("vesselName") or ""
+            voyage = first.get("vesselName") or first.get("vesselCode") or trunk
+            service = first.get("serviceLane") or ""
+            if not etd:
+                etd = first.get("departureDate") or ""
+            if not eta:
+                eta = last.get("berthingDate") or last.get("arrivalDate") or ""
+            if not pol:
+                pol = first.get("polName") or first.get("polLocationName") or ""
+            if not pod:
+                pod = last.get("podName") or last.get("podLocationName") or ""
+            if not transit:
+                transit = line.get("totalTransitTime") or first.get("transitTime") or ""
         else:
-            rows.append({
-                "Route": route,
-                "OriginCode": origin_code,
-                "DestCode": dest_code,
-                "POL": origin_kw,
-                "ETD": "",
-                "Service": "",
-                "Vessel": "(Parse pending)",
-                "Voyage": "",
-                "POD": dest_kw,
-                "ETA": "",
-                "TransitDays": "",
-                "Raw": body_norm[:300],
-                "ScrapedAt": scraped_at,
-            })
+            vessel = trunk
+            voyage = trunk
+            service = ""
 
-    print(f"  → {len(rows)} 行")
+        rows.append({
+            "Route": route,
+            "OriginCode": por_code,
+            "DestCode": del_code,
+            "POL": pol,
+            "ETD": etd,
+            "Service": service,
+            "Vessel": vessel,
+            "Voyage": voyage,
+            "POD": pod,
+            "ETA": eta,
+            "TransitDays": str(transit).replace(" day(s)", "").replace("days", "").strip(),
+            "Transshipment": f"{ts_type} ({ts_count})" if ts_count != "" else str(ts_type),
+            "ScrapedAt": scraped_at,
+        })
+
     return rows
 
 
-async def main():
+def main():
+    today = date.today()
+    from_date = today.isoformat()
+    to_date = (today + timedelta(days=28)).isoformat()
+
     all_rows = []
-
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(
-            headless=True,
-            args=["--disable-blink-features=AutomationControlled"],
-        )
-        context = await browser.new_context(
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/120.0.0.0 Safari/537.36"
-            ),
-            locale="en-US",
-            viewport={"width": 1440, "height": 900},
-        )
-        page = await context.new_page()
-
-        for origin_code, origin_kw, dest_code, dest_kw in ROUTES:
-            try:
-                rows = await scrape_route(page, origin_code, origin_kw, dest_code, dest_kw)
-                all_rows.extend(rows)
-            except Exception as e:
-                print(f"錯誤 {origin_code}→{dest_code}: {e}")
-                all_rows.append({
-                    "Route": f"{origin_code}→{dest_code}",
-                    "OriginCode": origin_code,
-                    "DestCode": dest_code,
-                    "POL": origin_kw,
-                    "ETD": "",
-                    "Service": "",
-                    "Vessel": f"(Error: {e})",
-                    "Voyage": "",
-                    "POD": dest_kw,
-                    "ETA": "",
-                    "TransitDays": "",
-                    "Raw": str(e),
-                    "ScrapedAt": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
-                })
-
-        await browser.close()
+    for por, dest in ROUTES:
+        print(f"查詢: {por} → {dest}")
+        rows = fetch_schedule(por, dest, from_date, to_date)
+        print(f"  → {len(rows)} 行")
+        all_rows.extend(rows)
+        time.sleep(2)  # 避免 429
 
     df = pd.DataFrame(all_rows)
     cols = [
         "Route", "OriginCode", "DestCode",
         "POL", "ETD", "Service", "Vessel", "Voyage",
-        "POD", "ETA", "TransitDays", "Raw", "ScrapedAt"
+        "POD", "ETA", "TransitDays", "Transshipment", "ScrapedAt",
     ]
     for c in cols:
         if c not in df.columns:
             df[c] = ""
     df = df[cols]
 
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    dated = OUTPUT_DIR / f"one_schedules_{today}.xlsx"
+    day = today.isoformat()
+    dated = OUTPUT_DIR / f"one_schedules_{day}.xlsx"
     latest = OUTPUT_DIR / "one_schedules_latest.xlsx"
     df.to_excel(dated, index=False)
     df.to_excel(latest, index=False)
@@ -261,4 +194,4 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
