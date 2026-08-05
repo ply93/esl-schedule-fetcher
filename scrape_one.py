@@ -7,24 +7,10 @@ import requests
 
 # 去重後航線 (porCode, delCode)
 ROUTES = [
+    ("HKHKG", "SEGOT"),
+    ("HKHKG", "NOOSL"),
     ("VNSGN", "NOTAE"),
-    ("VNSGN", "GBFXT"),
-    ("VNSGN", "NLRTM"),
     ("CNTAO", "ITSPE"),
-    ("CNTAO", "ITGOA"),
-    ("CNTAO", "ESVLC"),
-    ("CNTAO", "GBLGP"),
-    ("CNDLC", "ITGOA"),
-    ("CNWUH", "ITGOA"),
-    ("CNWUH", "BEANR"),
-    ("CNWUH", "GBLGP"),
-    ("CNCKG", "ITGOA"),
-    ("CNCKG", "GBLGP"),
-    ("CNSHA", "ROCND"),
-    ("CNSHA", "ITAOI"),
-    ("CNSHA", "ITGOA"),
-    ("CNSHA", "ITVCE"),
-    ("CNSHA", "ESBCN"),
 ]
 
 API_URL = "https://ecomm.one-line.com/api/v1/schedule/point-to-point"
