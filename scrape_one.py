@@ -28,7 +28,7 @@ HEADERS = {
 }
 
 
-def empty_row(por, dest, vessel_msg, scraped_at):
+def empty_row(por, dest, msg, scraped_at):
     return {
         "Route": f"{por}→{dest}",
         "OriginCode": por,
@@ -36,7 +36,7 @@ def empty_row(por, dest, vessel_msg, scraped_at):
         "POL": "",
         "ETD": "",
         "Service": "",
-        "Vessel": vessel_msg,
+        "Vessel": msg,
         "Voyage": "",
         "POD": "",
         "ETA": "",
@@ -47,7 +47,6 @@ def empty_row(por, dest, vessel_msg, scraped_at):
 
 
 def fetch_schedule(por_code, del_code, from_date, to_date):
-    route = f"{por_code}→{del_code}"
     scraped_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     params = {
         "porCode": por_code,
@@ -65,7 +64,6 @@ def fetch_schedule(por_code, del_code, from_date, to_date):
         try:
             r = requests.get(API_URL, params=params, headers=HEADERS, timeout=60)
             if r.status_code == 429:
-                print(f"  429 rate limit，等 {5 * (attempt + 1)} 秒...")
                 time.sleep(5 * (attempt + 1))
                 continue
             r.raise_for_status()
@@ -73,7 +71,6 @@ def fetch_schedule(por_code, del_code, from_date, to_date):
             break
         except Exception as e:
             last_err = e
-            print(f"  attempt {attempt + 1} 失敗: {e}")
             time.sleep(3)
 
     if data is None:
@@ -96,8 +93,7 @@ def fetch_schedule(por_code, del_code, from_date, to_date):
 
         journeys = line.get("journeys") or []
         if journeys:
-            first = journeys[0]
-            last = journeys[-1]
+            first, last = journeys[0], journeys[-1]
             vessel = first.get("vsslName") or first.get("vesselName") or ""
             voyage = first.get("vesselName") or first.get("vesselCode") or trunk
             service = first.get("serviceLane") or ""
@@ -105,19 +101,13 @@ def fetch_schedule(por_code, del_code, from_date, to_date):
             eta = eta or last.get("berthingDate") or last.get("arrivalDate") or ""
             pol = pol or first.get("polName") or first.get("polLocationName") or ""
             pod = pod or last.get("podName") or last.get("podLocationName") or ""
-            transit = transit or first.get("transitTime") or ""
         else:
-            vessel = trunk
-            voyage = trunk
-            service = ""
+            vessel, voyage, service = trunk, trunk, ""
 
-        if ts_count is not None and str(ts_count) != "":
-            ts_text = f"{ts_type} ({ts_count})".strip()
-        else:
-            ts_text = str(ts_type)
+        ts_text = f"{ts_type} ({ts_count})" if ts_count not in (None, "") else str(ts_type)
 
         rows.append({
-            "Route": route,
+            "Route": f"{por_code}→{del_code}",
             "OriginCode": por_code,
             "DestCode": del_code,
             "POL": pol,
@@ -131,7 +121,6 @@ def fetch_schedule(por_code, del_code, from_date, to_date):
             "Transshipment": ts_text,
             "ScrapedAt": scraped_at,
         })
-
     return rows
 
 
@@ -142,7 +131,7 @@ def main():
 
     all_rows = []
     for por, dest in ROUTES:
-        print(f"查詢: {por} → {dest}")
+        print(f"[ONE] {por} → {dest}")
         rows = fetch_schedule(por, dest, from_date, to_date)
         print(f"  → {len(rows)} 行")
         all_rows.extend(rows)
@@ -150,9 +139,8 @@ def main():
 
     df = pd.DataFrame(all_rows)
     cols = [
-        "Route", "OriginCode", "DestCode",
-        "POL", "ETD", "Service", "Vessel", "Voyage",
-        "POD", "ETA", "TransitDays", "Transshipment", "ScrapedAt",
+        "Route", "OriginCode", "DestCode", "POL", "ETD", "Service",
+        "Vessel", "Voyage", "POD", "ETA", "TransitDays", "Transshipment", "ScrapedAt",
     ]
     for c in cols:
         if c not in df.columns:
@@ -160,14 +148,9 @@ def main():
     df = df[cols]
 
     day = today.isoformat()
-    dated = OUTPUT_DIR / f"one_schedules_{day}.xlsx"
-    latest = OUTPUT_DIR / "one_schedules_latest.xlsx"
-    df.to_excel(dated, index=False)
-    df.to_excel(latest, index=False)
-
-    print(f"\n完成，共 {len(df)} 行")
-    print(f"已儲存: {dated}")
-    print(f"已儲存: {latest}")
+    df.to_excel(OUTPUT_DIR / f"one_schedules_{day}.xlsx", index=False)
+    df.to_excel(OUTPUT_DIR / "one_schedules_latest.xlsx", index=False)
+    print(f"[ONE] 完成 {len(df)} 行")
 
 
 if __name__ == "__main__":
