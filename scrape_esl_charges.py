@@ -5,7 +5,6 @@ from pathlib import Path
 
 import pandas as pd
 import requests
-from bs4 import BeautifulSoup
 
 PORT_LIST_URL = "https://www.emiratesline.com/wp-content/themes/esl/inc/api/origin-list-data.php"
 CHARGE_URL = "https://www.emiratesline.com/services-and-information/carrier-charge-finder/"
@@ -30,12 +29,25 @@ def get_ports(session: requests.Session):
     data = r.json()
     ports = []
     seen = set()
+
     for item in data:
-        code = (item.get("portCode") or item.get("value") or "").strip()
-        name = (item.get("portName") or item.get("label") or code).strip()
+        code, name = "", ""
+
+        if isinstance(item, dict):
+            code = (item.get("portCode") or item.get("value") or "").strip()
+            name = (item.get("portName") or item.get("label") or code).strip()
+        elif isinstance(item, str):
+            # 例如: "NINGBO, CHINA (CNNGB)"
+            name = item.strip()
+            m = re.search(r"\(([A-Z0-9]+)\)\s*$", name)
+            code = m.group(1) if m else ""
+        else:
+            continue
+
         if code and code not in seen:
             seen.add(code)
             ports.append((code, name))
+
     return ports
 
 
@@ -46,48 +58,38 @@ def get_ncforminfo(session: requests.Session) -> str:
     return m.group(1) if m else ""
 
 
-def parse_charge_table(html: str, origin_code, origin_name, dest_code, dest_name, cargo, scraped_at):
+def parse_charge_table(html, origin_code, origin_name, dest_code, dest_name, cargo, scraped_at):
     rows = []
-    soup = BeautifulSoup(html, "html.parser")
-    table = soup.find("table")
-    if not table:
+    m = re.search(r"<table[^>]*>(.*?)</table>", html, re.S | re.I)
+    if not m:
         return rows
 
-    headers = [th.get_text(strip=True) for th in table.find_all("th")]
-    # 常見: CHARGES | TERMINAL | DRY Per 20' | DRY Per 40' | HIGH Per 40'
-    # Reefer 可能欄名唔同，一律用 header 動態對
+    table_html = m.group(1)
+    trs = re.findall(r"<tr[^>]*>(.*?)</tr>", table_html, re.S | re.I)
 
-    for tr in table.find_all("tr"):
-        cells = [td.get_text(strip=True) for td in tr.find_all("td")]
+    for tr in trs:
+        cells = re.findall(r"<t[hd][^>]*>(.*?)</t[hd]>", tr, re.S | re.I)
+        cells = [re.sub(r"<[^>]+>", "", c).strip() for c in cells]
         if len(cells) < 2:
             continue
+        # 跳過表頭
+        if cells[0].upper() in ("CHARGES", "CHARGE"):
+            continue
 
-        charge_name = cells[0]
-        terminal = cells[1] if len(cells) > 1 else ""
-
-        # 其餘欄位按 header 對應
-        amounts = {}
-        for i, h in enumerate(headers[2:], start=2):
-            amounts[h] = cells[i] if i < len(cells) else ""
-
-        # 展平成多欄；同時保留 raw
-        row = {
+        rows.append({
             "OriginCode": origin_code,
             "OriginName": origin_name,
             "DestCode": dest_code,
             "DestName": dest_name,
             "CargoType": cargo,
-            "ChargeName": charge_name,
-            "Terminal": terminal,
+            "ChargeName": cells[0],
+            "Terminal": cells[1] if len(cells) > 1 else "",
+            "Per20": cells[2] if len(cells) > 2 else "",
+            "Per40": cells[3] if len(cells) > 3 else "",
+            "Per40HC": cells[4] if len(cells) > 4 else "",
+            "RawColumns": " | ".join(cells),
             "ScrapedAt": scraped_at,
-        }
-        # 標準化常見欄
-        row["Per20"] = amounts.get("DRY Per 20’") or amounts.get("DRY Per 20'") or amounts.get("REEFER Per 20’") or amounts.get("Per 20’") or (cells[2] if len(cells) > 2 else "")
-        row["Per40"] = amounts.get("DRY Per 40’") or amounts.get("DRY Per 40'") or amounts.get("REEFER Per 40’") or amounts.get("Per 40’") or (cells[3] if len(cells) > 3 else "")
-        row["Per40HC"] = amounts.get("HIGH Per 40’") or amounts.get("HIGH Per 40'") or amounts.get("HC Per 40’") or (cells[4] if len(cells) > 4 else "")
-        row["RawColumns"] = " | ".join(f"{h}={amounts.get(h,'')}" for h in headers[2:]) if headers[2:] else " | ".join(cells[2:])
-
-        rows.append(row)
+        })
     return rows
 
 
@@ -107,7 +109,9 @@ def fetch_route_charges(session, token, origin_code, origin_name, dest_code, des
             time.sleep(8)
             r = session.post(CHARGE_URL, data=data, headers=HEADERS, timeout=60)
         r.raise_for_status()
-        rows = parse_charge_table(r.text, origin_code, origin_name, dest_code, dest_name, cargo.capitalize(), scraped_at)
+        rows = parse_charge_table(
+            r.text, origin_code, origin_name, dest_code, dest_name, cargo.capitalize(), scraped_at
+        )
         if not rows:
             return [{
                 "OriginCode": origin_code,
@@ -147,11 +151,31 @@ def main():
     session.headers.update(HEADERS)
 
     print("下載港口清單...")
-    ports = get_ports(session)
+    ports = None
+    last_err = None
+    for attempt in range(5):
+        try:
+            ports = get_ports(session)
+            if ports:
+                break
+            last_err = "empty port list"
+        except Exception as e:
+            last_err = e
+            print(f"  港口清單 attempt {attempt + 1} 失敗: {e}")
+            time.sleep(3 * (attempt + 1))
+
+    if not ports:
+        raise SystemExit(f"無法取得港口清單: {last_err}")
+
     origins = [(c, n) for c, n in ports if c.startswith(("CN", "HK"))]
     destinations = [(c, n) for c, n in ports if not c.startswith(("CN", "HK"))]
     print(f"Origin CN/HK: {len(origins)} | Destination 其他: {len(destinations)}")
     print(f"預計查詢次數: {len(origins) * len(destinations) * 2} (含 Dry+Reefer)")
+
+    if not origins:
+        raise SystemExit("找不到 CN/HK 起運港")
+    if not destinations:
+        raise SystemExit("找不到目的港")
 
     token = get_ncforminfo(session)
     print("取得 form token")
@@ -171,7 +195,7 @@ def main():
                 all_rows.extend(rows)
                 time.sleep(0.35)
 
-            # 每 30 次航線換一次 token，減低被擋機會
+            # 每 30 條航線刷新 token
             if done % 60 == 0:
                 try:
                     token = get_ncforminfo(session)
@@ -193,6 +217,7 @@ def main():
     latest = OUTPUT_DIR / "esl_charges_latest.xlsx"
     df.to_excel(dated, index=False)
     df.to_excel(latest, index=False)
+
     print(f"\n完成: {len(df)} 行")
     print(f"已儲存: {dated}")
     print(f"已儲存: {latest}")
