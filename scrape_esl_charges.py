@@ -1,153 +1,76 @@
+import asyncio
 import re
-import time
 from datetime import date, datetime, timezone
 from pathlib import Path
 
 import pandas as pd
-import requests
+from playwright.async_api import async_playwright
 
 CHARGE_URL = "https://www.emiratesline.com/services-and-information/carrier-charge-finder/"
-PORT_LIST_URLS = [
-    "https://www.emiratesline.com/wp-content/themes/esl/inc/api/origin-list-data.php",
-    "https://www.emiratesline.com/wp-content/themes/esl/inc/api/destination-list-data.php",
-    "https://www.emiratesline.com/wp-content/themes/esl/inc/api/form-origin-list-data.php",
-]
-
 OUTPUT_DIR = Path("output")
 OUTPUT_DIR.mkdir(exist_ok=True)
 
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/120.0.0.0 Safari/537.36"
-    ),
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Origin": "https://www.emiratesline.com",
-    "Referer": CHARGE_URL,
-}
-
-# API 失效時用呢份後備清單（可自行增刪）
-# 起運：CN / HK
-FALLBACK_ORIGINS = [
-    ("HKHKG", "HONG KONG, HONG KONG (HKHKG)"),
-    ("CNNGB", "NINGBO, CHINA (CNNGB)"),
-    ("CNSHA", "SHANGHAI, CHINA (CNSHA)"),
-    ("CNTAO", "QINGDAO, CHINA (CNTAO)"),
-    ("CNDLC", "DALIAN, CHINA (CNDLC)"),
-    ("CNYTN", "YANTIAN, CHINA (CNYTN)"),
-    ("CNSHE", "SHEKOU, CHINA (CNSHE)"),
-    ("CNXMN", "XIAMEN, CHINA (CNXMN)"),
-    ("CNNSA", "NANSHA, CHINA (CNNSA)"),
-    ("CNTXG", "TIANJIN XINGANG, CHINA (CNTXG)"),
-    ("CNXNG", "XINGANG, CHINA (CNXNG)"),
-    ("CNWUH", "WUHAN, CHINA (CNWUH)"),
-    ("CNCKG", "CHONGQING, CHINA (CNCKG)"),
-    ("CNNJG", "NANJING, CHINA (CNNJG)"),
-    ("CNZJG", "ZHANGJIAGANG, CHINA (CNZJG)"),
-    ("CNFOC", "FUZHOU, CHINA (CNFOC)"),
-    ("CNCAN", "GUANGZHOU, CHINA (CNCAN)"),
-    ("CNLYG", "LIANYUNGANG, CHINA (CNLYG)"),
+# CN / HK 出口
+ORIGINS = [
+    ("HKHKG", "HONG KONG"),
+    ("CNNGB", "NINGBO"),
+    ("CNSHA", "SHANGHAI"),
+    ("CNTAO", "QINGDAO"),
+    ("CNDLC", "DALIAN"),
+    ("CNYTN", "YANTIAN"),
+    ("CNSHE", "SHEKOU"),
+    ("CNXMN", "XIAMEN"),
+    ("CNNSA", "NANSHA"),
+    ("CNXNG", "XINGANG"),
+    ("CNWUH", "WUHAN"),
+    ("CNCKG", "CHONGQING"),
 ]
 
-# 目的：常見海外港（非 CN/HK）
-FALLBACK_DESTINATIONS = [
-    ("AEJEA", "JEBEL ALI, U.A.E. (AEJEA)"),
-    ("AEAUH", "ABU DHABI, U.A.E. (AEAUH)"),
-    ("AEDXB", "DUBAI, U.A.E. (AEDXB)"),
-    ("AESHJ", "SHARJAH, U.A.E. (AESHJ)"),
-    ("OMSOH", "SOHAR, OMAN (OMSOH)"),
-    ("SGSIN", "SINGAPORE, SINGAPORE (SGSIN)"),
-    ("MYPKG", "PORT KELANG, MALAYSIA (MYPKG)"),
-    ("NLRTM", "ROTTERDAM, NETHERLANDS (NLRTM)"),
-    ("BEANR", "ANTWERP, BELGIUM (BEANR)"),
-    ("DEHAM", "HAMBURG, GERMANY (DEHAM)"),
-    ("GBFXT", "FELIXSTOWE, U.K. (GBFXT)"),
-    ("ITGOA", "GENOA, ITALY (ITGOA)"),
-    ("ITSPE", "LA SPEZIA, ITALY (ITSPE)"),
-    ("ESBCN", "BARCELONA, SPAIN (ESBCN)"),
-    ("ESVLC", "VALENCIA, SPAIN (ESVLC)"),
-    ("EGALY", "ALEXANDRIA, EGYPT (EGALY)"),
-    ("EGPSD", "PORT SAID, EGYPT (EGPSD)"),
-    ("SAJED", "JEDDAH, SAUDI ARABIA (SAJED)"),
-    ("SADMM", "DAMMAM, SAUDI ARABIA (SADMM)"),
-    ("INNSA", "NHAVA SHEVA, INDIA (INNSA)"),
-    ("INMAA", "CHENNAI, INDIA (INMAA)"),
-    ("LKCMB", "COLOMBO, SRI LANKA (LKCMB)"),
-    ("PKKHI", "KARACHI, PAKISTAN (PKKHI)"),
-    ("BDCGP", "CHITTAGONG, BANGLADESH (BDCGP)"),
-    ("KRPUS", "BUSAN, SOUTH KOREA (KRPUS)"),
-    ("JPYOK", "YOKOHAMA, JAPAN (JPYOK)"),
-    ("JPTYO", "TOKYO, JAPAN (JPTYO)"),
-    ("AUMEL", "MELBOURNE, AUSTRALIA (AUMEL)"),
-    ("AUSYD", "SYDNEY, AUSTRALIA (AUSYD)"),
-    ("ZADUR", "DURBAN, SOUTH AFRICA (ZADUR)"),
-    ("BRSSZ", "SANTOS, BRAZIL (BRSSZ)"),
-    ("USLAX", "LOS ANGELES, U.S.A. (USLAX)"),
-    ("USNYC", "NEW YORK, U.S.A. (USNYC)"),
-    ("SEGOT", "GOTHENBURG, SWEDEN (SEGOT)"),
-    ("NOOSL", "OSLO, NORWAY (NOOSL)"),
-    ("NOTAE", "TANANGER, NORWAY (NOTAE)"),
+# 常用目的港
+DESTINATIONS = [
+    ("AEJEA", "JEBEL ALI"),
+    ("AEAUH", "ABU DHABI"),
+    ("OMSOH", "SOHAR"),
+    ("SGSIN", "SINGAPORE"),
+    ("NLRTM", "ROTTERDAM"),
+    ("BEANR", "ANTWERP"),
+    ("GBFXT", "FELIXSTOWE"),
+    ("ITGOA", "GENOA"),
+    ("ITSPE", "LA SPEZIA"),
+    ("ESBCN", "BARCELONA"),
+    ("SAJED", "JEDDAH"),
+    ("SADMM", "DAMMAM"),
+    ("INNSA", "NHAVA SHEVA"),
+    ("SEGOT", "GOTHENBURG"),
+    ("NOOSL", "OSLO"),
+    ("NOTAE", "TANANGER"),
 ]
 
 
-def parse_port_item(item):
-    code, name = "", ""
-    if isinstance(item, dict):
-        code = (item.get("portCode") or item.get("value") or "").strip()
-        name = (item.get("portName") or item.get("label") or code).strip()
-    elif isinstance(item, str):
-        name = item.strip()
-        m = re.search(r"\(([A-Z0-9]+)\)\s*$", name)
-        code = m.group(1) if m else ""
-    return code, name
+def empty_row(o_code, o_name, d_code, d_name, cargo, msg, scraped_at):
+    return {
+        "OriginCode": o_code,
+        "OriginName": o_name,
+        "DestCode": d_code,
+        "DestName": d_name,
+        "CargoType": cargo,
+        "ChargeName": msg,
+        "Terminal": "",
+        "Per20": "",
+        "Per40": "",
+        "Per40HC": "",
+        "RawColumns": "",
+        "ScrapedAt": scraped_at,
+    }
 
 
-def get_ports_from_api(session: requests.Session):
-    """嘗試官方 API；失敗回傳空 list。"""
-    for url in PORT_LIST_URLS:
-        try:
-            r = session.get(url, timeout=60)
-            if r.status_code != 200:
-                print(f"  {url} HTTP {r.status_code}")
-                continue
-            data = r.json()
-            if isinstance(data, dict) and data.get("error"):
-                print(f"  {url} error: {data.get('error')}")
-                continue
-            if not isinstance(data, list) or not data:
-                print(f"  {url} empty/invalid list")
-                continue
-
-            ports, seen = [], set()
-            for item in data:
-                code, name = parse_port_item(item)
-                if code and code not in seen:
-                    seen.add(code)
-                    ports.append((code, name))
-            if ports:
-                print(f"  使用 API: {url} ({len(ports)} ports)")
-                return ports
-        except Exception as e:
-            print(f"  {url} 失敗: {e}")
-    return []
-
-
-def get_ncforminfo(session: requests.Session) -> str:
-    r = session.get(CHARGE_URL, timeout=60)
-    r.raise_for_status()
-    m = re.search(r'name="__ncforminfo"[^>]*value="([^"]*)"', r.text)
-    return m.group(1) if m else ""
-
-
-def parse_charge_table(html, origin_code, origin_name, dest_code, dest_name, cargo, scraped_at):
+def parse_table(html, o_code, o_name, d_code, d_name, cargo, scraped_at):
     rows = []
     m = re.search(r"<table[^>]*>(.*?)</table>", html, re.S | re.I)
     if not m:
         return rows
 
-    table_html = m.group(1)
-    trs = re.findall(r"<tr[^>]*>(.*?)</tr>", table_html, re.S | re.I)
+    trs = re.findall(r"<tr[^>]*>(.*?)</tr>", m.group(1), re.S | re.I)
     for tr in trs:
         cells = re.findall(r"<t[hd][^>]*>(.*?)</t[hd]>", tr, re.S | re.I)
         cells = [re.sub(r"<[^>]+>", "", c).strip() for c in cells]
@@ -157,10 +80,10 @@ def parse_charge_table(html, origin_code, origin_name, dest_code, dest_name, car
             continue
 
         rows.append({
-            "OriginCode": origin_code,
-            "OriginName": origin_name,
-            "DestCode": dest_code,
-            "DestName": dest_name,
+            "OriginCode": o_code,
+            "OriginName": o_name,
+            "DestCode": d_code,
+            "DestName": d_name,
             "CargoType": cargo,
             "ChargeName": cells[0],
             "Terminal": cells[1] if len(cells) > 1 else "",
@@ -173,103 +96,88 @@ def parse_charge_table(html, origin_code, origin_name, dest_code, dest_name, car
     return rows
 
 
-def fetch_route_charges(session, token, origin_code, origin_name, dest_code, dest_name, cargo, scraped_at):
-    data = {
-        "originPort": origin_name,
-        "originPortCode": origin_code,
-        "destinationPort": dest_name,
-        "destinationPortCode": dest_code,
-        "cargoType": cargo.lower(),
-        "ncformfield": "",
-        "__ncforminfo": token,
-    }
+async def fill_port(page, input_id: str, keyword: str):
+    el = page.locator(f"#{input_id}")
+    await el.click()
+    await el.fill("")
+    await el.type(keyword, delay=40)
+    await page.wait_for_timeout(1200)
+    await el.press("ArrowDown")
+    await page.wait_for_timeout(250)
+    await el.press("Enter")
+    await page.wait_for_timeout(400)
+
+
+async def select_cargo(page, cargo: str):
+    if cargo.lower() == "reefer":
+        loc = page.locator("#reefer")
+    else:
+        loc = page.locator("#dry")
+    if await loc.count() > 0:
+        await loc.check()
+    else:
+        await page.get_by_label(cargo.capitalize()).check()
+    await page.wait_for_timeout(200)
+
+
+async def scrape_one(page, o_code, o_kw, d_code, d_kw, cargo: str, scraped_at: str):
+    print(f"  {o_code} → {d_code} ({cargo})")
     try:
-        r = session.post(CHARGE_URL, data=data, headers=HEADERS, timeout=60)
-        if r.status_code == 429:
-            time.sleep(8)
-            r = session.post(CHARGE_URL, data=data, headers=HEADERS, timeout=60)
-        r.raise_for_status()
-        rows = parse_charge_table(
-            r.text, origin_code, origin_name, dest_code, dest_name, cargo.capitalize(), scraped_at
-        )
+        await page.goto(CHARGE_URL, wait_until="domcontentloaded", timeout=60000)
+        await page.wait_for_timeout(2500)
+
+        await fill_port(page, "originPort", o_kw)
+        await fill_port(page, "destinationPort", d_kw)
+        await select_cargo(page, cargo)
+
+        await page.locator("button.primary-btn, button[type='submit']").first.click()
+        await page.wait_for_timeout(4000)
+
+        html = await page.content()
+        rows = parse_table(html, o_code, o_kw, d_code, d_kw, cargo.capitalize(), scraped_at)
         if not rows:
-            return [{
-                "OriginCode": origin_code,
-                "OriginName": origin_name,
-                "DestCode": dest_code,
-                "DestName": dest_name,
-                "CargoType": cargo.capitalize(),
-                "ChargeName": "(No charges found)",
-                "Terminal": "",
-                "Per20": "",
-                "Per40": "",
-                "Per40HC": "",
-                "RawColumns": "",
-                "ScrapedAt": scraped_at,
-            }]
+            await page.wait_for_timeout(3000)
+            html = await page.content()
+            rows = parse_table(html, o_code, o_kw, d_code, d_kw, cargo.capitalize(), scraped_at)
+
+        if not rows:
+            return [empty_row(o_code, o_kw, d_code, d_kw, cargo.capitalize(), "(No charges found)", scraped_at)]
         return rows
     except Exception as e:
-        return [{
-            "OriginCode": origin_code,
-            "OriginName": origin_name,
-            "DestCode": dest_code,
-            "DestName": dest_name,
-            "CargoType": cargo.capitalize(),
-            "ChargeName": f"(Error: {e})",
-            "Terminal": "",
-            "Per20": "",
-            "Per40": "",
-            "Per40HC": "",
-            "RawColumns": "",
-            "ScrapedAt": scraped_at,
-        }]
+        return [empty_row(o_code, o_kw, d_code, d_kw, cargo.capitalize(), f"(Error: {e})", scraped_at)]
 
 
-def main():
+async def main():
     scraped_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    session = requests.Session()
-    session.headers.update(HEADERS)
-
-    print("下載港口清單...")
-    ports = get_ports_from_api(session)
-
-    if ports:
-        origins = [(c, n) for c, n in ports if c.startswith(("CN", "HK"))]
-        destinations = [(c, n) for c, n in ports if not c.startswith(("CN", "HK"))]
-    else:
-        print("API 不可用，改用內建 FALLBACK 港口清單")
-        origins = list(FALLBACK_ORIGINS)
-        destinations = list(FALLBACK_DESTINATIONS)
-
-    print(f"Origin CN/HK: {len(origins)} | Destination: {len(destinations)}")
-    print(f"預計查詢次數: {len(origins) * len(destinations) * 2} (Dry+Reefer)")
-
-    if not origins or not destinations:
-        raise SystemExit("起運或目的港清單為空")
-
-    token = get_ncforminfo(session)
-    print("取得 form token")
-
     all_rows = []
-    total = len(origins) * len(destinations) * 2
-    done = 0
 
-    for o_code, o_name in origins:
-        for d_code, d_name in destinations:
-            for cargo in ("dry", "reefer"):
-                done += 1
-                print(f"[{done}/{total}] {o_code} → {d_code} ({cargo})")
-                rows = fetch_route_charges(
-                    session, token, o_code, o_name, d_code, d_name, cargo, scraped_at
-                )
-                all_rows.extend(rows)
-                time.sleep(0.35)
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(
+            headless=True,
+            args=["--disable-blink-features=AutomationControlled"],
+        )
+        context = await browser.new_context(
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
+            ),
+            locale="en-US",
+            viewport={"width": 1400, "height": 900},
+        )
+        page = await context.new_page()
 
-            if done % 60 == 0:
-                try:
-                    token = get_ncforminfo(session)
-                except Exception:
-                    pass
+        total = len(ORIGINS) * len(DESTINATIONS) * 2
+        done = 0
+        for o_code, o_kw in ORIGINS:
+            for d_code, d_kw in DESTINATIONS:
+                for cargo in ("dry", "reefer"):
+                    done += 1
+                    print(f"[{done}/{total}]")
+                    rows = await scrape_one(page, o_code, o_kw, d_code, d_kw, cargo, scraped_at)
+                    all_rows.extend(rows)
+
+        await browser.close()
 
     df = pd.DataFrame(all_rows)
     cols = [
@@ -293,4 +201,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
