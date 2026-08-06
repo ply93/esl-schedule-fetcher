@@ -18,9 +18,12 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: |
+          pip install -r requirements.txt
+          playwright install chromium
+          playwright install-deps chromium
 
-      - name: Run ESL route charges scraper
+      - name: Run ESL charges scraper
         run: python scrape_esl_charges.py
 
       - uses: actions/upload-artifact@v4
@@ -33,7 +36,8 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add output/esl_charges_*.xlsx
+          mkdir -p output
+          git add output/esl_charges_*.xlsx || true
           git diff --staged --quiet || git commit -m "chore: update ESL route charges $(date -u +%Y-%m-%d)"
           git push
         env:
