@@ -1,259 +1,206 @@
-import asyncio
-import re
-from datetime import date, datetime, timezone
+#!/usr/bin/env python3
+"""
+Emirates Shipping Line - Carrier Charge Finder Scraper
+使用 Chromium + Selenium 自動填表 + 拎結果
+"""
+
+import time
+import json
+import argparse
 from pathlib import Path
+from datetime import datetime
 
-import pandas as pd
-from playwright.async_api import async_playwright
-
-CHARGE_URL = "https://www.emiratesline.com/services-and-information/carrier-charge-finder/"
-OUTPUT_DIR = Path("output")
-OUTPUT_DIR.mkdir(exist_ok=True)
-
-# (code, 顯示名／autocomplete keyword)
-ORIGINS = [
-    ("HKHKG", "HONG KONG"),
-]
-
-DESTINATIONS = [
-    ("AEJEA", "JEBEL ALI"),
-]
+from selenium import webdriver
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException, NoSuchElementException
+from webdriver_manager.chrome import ChromeDriverManager
 
 
-def empty_row(o_code, o_name, d_code, d_name, cargo, msg, scraped_at, raw=""):
-    return {
-        "OriginCode": o_code,
-        "OriginName": o_name,
-        "DestCode": d_code,
-        "DestName": d_name,
-        "CargoType": cargo,
-        "ChargeName": msg,
-        "Terminal": "",
-        "Per20": "",
-        "Per40": "",
-        "Per40HC": "",
-        "RawColumns": raw,
-        "ScrapedAt": scraped_at,
-    }
+def create_driver(headless: bool = False) -> webdriver.Chrome:
+    options = Options()
+    options.add_argument("--window-size=1400,900")
+    options.add_argument("--disable-blink-features=AutomationControlled")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    options.add_experimental_option("useAutomationExtension", False)
 
+    if headless:
+        options.add_argument("--headless=new")
 
-def parse_table(html, o_code, o_name, d_code, d_name, cargo, scraped_at):
-    rows = []
-    # 只搵有 CHARGES 欄嘅表
-    tables = re.findall(r"<table[^>]*>(.*?)</table>", html, re.S | re.I)
-    for table_html in tables:
-        if not re.search(r"CHARGES", table_html, re.I):
-            continue
-        trs = re.findall(r"<tr[^>]*>(.*?)</tr>", table_html, re.S | re.I)
-        for tr in trs:
-            cells = re.findall(r"<t[hd][^>]*>(.*?)</t[hd]>", tr, re.S | re.I)
-            cells = [re.sub(r"<[^>]+>", "", c).strip() for c in cells]
-            if len(cells) < 2:
-                continue
-            if cells[0].upper() in ("CHARGES", "CHARGE"):
-                continue
-            rows.append({
-                "OriginCode": o_code,
-                "OriginName": o_name,
-                "DestCode": d_code,
-                "DestName": d_name,
-                "CargoType": cargo,
-                "ChargeName": cells[0],
-                "Terminal": cells[1] if len(cells) > 1 else "",
-                "Per20": cells[2] if len(cells) > 2 else "",
-                "Per40": cells[3] if len(cells) > 3 else "",
-                "Per40HC": cells[4] if len(cells) > 4 else "",
-                "RawColumns": " | ".join(cells),
-                "ScrapedAt": scraped_at,
-            })
-        if rows:
-            break
-    return rows
+    # 用 Chromium / Chrome
+    service = Service(ChromeDriverManager().install())
+    driver = webdriver.Chrome(service=service, options=options)
 
-
-async def set_port(page, which: str, code: str, keyword: str):
-    """
-    which: origin / destination
-    1) 填可見 input
-    2) 試 autocomplete 點選
-    3) 強制寫 hidden port code（關鍵）
-    """
-    input_id = "originPort" if which == "origin" else "destinationPort"
-    hidden_id = "originPortCode" if which == "origin" else "destinationPortCode"
-
-    el = page.locator(f"#{input_id}")
-    await el.click()
-    await el.fill("")
-    await el.type(keyword, delay=50)
-    await page.wait_for_timeout(1500)
-
-    # 試撳 autocomplete 項目
-    try:
-        item = page.locator(".ui-autocomplete .ui-menu-item, .ui-menu .ui-menu-item").first
-        if await item.count() > 0 and await item.is_visible():
-            await item.click()
-            await page.wait_for_timeout(400)
-    except Exception:
-        try:
-            await el.press("ArrowDown")
-            await page.wait_for_timeout(200)
-            await el.press("Enter")
-            await page.wait_for_timeout(400)
-        except Exception:
-            pass
-
-    # 強制寫 hidden code + 觸發 change（網站靠呢兩個 field 先 enable Search）
-    await page.evaluate(
-        """([hiddenId, inputId, code, keyword]) => {
-            const hidden = document.getElementById(hiddenId);
-            const input = document.getElementById(inputId);
-            if (hidden) {
-                hidden.value = code;
-                hidden.dispatchEvent(new Event('input', { bubbles: true }));
-                hidden.dispatchEvent(new Event('change', { bubbles: true }));
-            }
-            if (input && !input.value) {
-                input.value = keyword;
-                input.dispatchEvent(new Event('input', { bubbles: true }));
-                input.dispatchEvent(new Event('change', { bubbles: true }));
-            }
-            // enable submit
-            document.querySelectorAll('button[type=submit], button.primary-btn').forEach(btn => {
-                btn.disabled = false;
-                btn.removeAttribute('disabled');
-            });
-        }""",
-        [hidden_id, input_id, code, keyword],
+    # 隱藏 webdriver 特徵
+    driver.execute_cdp_cmd(
+        "Page.addScriptToEvaluateOnNewDocument",
+        {
+            "source": """
+            Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+            """
+        },
     )
-    await page.wait_for_timeout(300)
+    return driver
 
 
-async def select_cargo(page, cargo: str):
-    if cargo.lower() == "reefer":
-        loc = page.locator("#reefer")
-    else:
-        loc = page.locator("#dry")
-    if await loc.count() > 0:
-        await loc.check()
-    else:
-        await page.get_by_text(cargo.capitalize(), exact=True).click()
-    await page.wait_for_timeout(200)
+def select_port(driver, input_id: str, hidden_id: str, port_text: str, timeout: int = 15):
+    """輸入港口並選擇 autocomplete 建議，確保 hidden code 有值"""
+    wait = WebDriverWait(driver, timeout)
 
+    input_el = wait.until(EC.element_to_be_clickable((By.ID, input_id)))
+    input_el.clear()
+    input_el.send_keys(port_text)
 
-async def scrape_one(page, o_code, o_kw, d_code, d_kw, cargo: str, scraped_at: str):
-    print(f"  {o_code} → {d_code} ({cargo})")
+    # 等 jQuery UI autocomplete 出現
     try:
-        await page.goto(CHARGE_URL, wait_until="domcontentloaded", timeout=60000)
-        await page.wait_for_timeout(2500)
-
-        # CAPTCHA / validation 頁
-        body_text = await page.locator("body").inner_text()
-        if "validation required" in body_text.lower() or "captcha" in body_text.lower():
-            return [empty_row(
-                o_code, o_kw, d_code, d_kw, cargo.capitalize(),
-                "(Blocked: CAPTCHA/validation page)", scraped_at, body_text[:200]
-            )]
-
-        await set_port(page, "origin", o_code, o_kw)
-        await set_port(page, "destination", d_code, d_kw)
-        await select_cargo(page, cargo)
-
-        # 確認 hidden code
-        codes = await page.evaluate(
-            """() => ({
-                o: document.getElementById('originPortCode')?.value || '',
-                d: document.getElementById('destinationPortCode')?.value || ''
-            })"""
+        # 常見 selector
+        suggestion = wait.until(
+            EC.visibility_of_element_located(
+                (By.CSS_SELECTOR, "ul.ui-autocomplete li.ui-menu-item")
+            )
         )
-        print(f"    hidden codes: origin={codes.get('o')} dest={codes.get('d')}")
+        # 點第一個匹配或者包含文字嘅
+        items = driver.find_elements(By.CSS_SELECTOR, "ul.ui-autocomplete li.ui-menu-item")
+        clicked = False
+        for item in items:
+            if port_text.upper() in item.text.upper() or item.text.strip():
+                item.click()
+                clicked = True
+                break
+        if not clicked and items:
+            items[0].click()
+    except TimeoutException:
+        # 有時直接 Enter 都可以
+        input_el.send_keys(Keys.ENTER)
 
-        btn = page.locator("button.primary-btn, button[type='submit']").first
-        await btn.click(force=True)
-        await page.wait_for_timeout(5000)
+    time.sleep(0.8)
 
-        # 等 table 出現
+    # 確認 hidden code 有值
+    hidden = driver.find_element(By.ID, hidden_id)
+    code = hidden.get_attribute("value")
+    if not code:
+        raise ValueError(f"無法正確選擇港口：{port_text}（hidden code 為空）")
+    print(f"  ✓ 已選 {port_text} → code = {code}")
+    return code
+
+
+def scrape_charges(
+    origin: str,
+    destination: str,
+    cargo_type: str = "dry",
+    headless: bool = False,
+    save_html: bool = True,
+):
+    url = "https://www.emiratesline.com/services-and-information/carrier-charge-finder/"
+    driver = create_driver(headless=headless)
+
+    try:
+        print(f"打開頁面：{url}")
+        driver.get(url)
+        time.sleep(2)
+
+        # 選擇 Origin
+        print(f"選擇 Origin: {origin}")
+        select_port(driver, "originPort", "originPortCode", origin)
+
+        # 選擇 Destination
+        print(f"選擇 Destination: {destination}")
+        select_port(driver, "destinationPort", "destinationPortCode", destination)
+
+        # 選擇 Cargo Type
+        cargo_type = cargo_type.lower()
+        if cargo_type not in ("dry", "reefer"):
+            raise ValueError("cargo_type 只能是 dry 或 reefer")
+
+        radio = driver.find_element(By.ID, cargo_type)
+        driver.execute_script("arguments[0].click();", radio)
+        print(f"  ✓ Cargo Type = {cargo_type}")
+
+        # 撳 Search
+        search_btn = driver.find_element(By.CSS_SELECTOR, "button.primary-btn[type='submit']")
+        search_btn.click()
+        print("已提交，等待結果...")
+
+        # 等結果出現（最多等 12 秒）
+        time.sleep(3)
         try:
-            await page.wait_for_selector("table:has-text('CHARGES'), table:has-text('TERMINAL')", timeout=8000)
-        except Exception:
-            pass
+            WebDriverWait(driver, 10).until(
+                lambda d: len(d.find_elements(By.CSS_SELECTOR, "table, .accordion, .result, [class*='charge']")) > 0
+                or "no charge" in d.page_source.lower()
+            )
+        except TimeoutException:
+            print("⚠ 等唔到明顯結果元素，繼續儲存頁面內容")
 
-        html = await page.content()
-        rows = parse_table(html, o_code, o_kw, d_code, d_kw, cargo.capitalize(), scraped_at)
+        # 儲存 HTML（方便之後分析 / 調試）
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        if save_html:
+            html_path = Path(f"result_{timestamp}.html")
+            html_path.write_text(driver.page_source, encoding="utf-8")
+            print(f"已儲存完整頁面 → {html_path}")
 
-        if not rows:
-            # 再等一次
-            await page.wait_for_timeout(4000)
-            html = await page.content()
-            rows = parse_table(html, o_code, o_kw, d_code, d_kw, cargo.capitalize(), scraped_at)
+        # 嘗試提取表格資料
+        tables = driver.find_elements(By.TAG_NAME, "table")
+        results = []
+        for i, table in enumerate(tables):
+            rows = []
+            for tr in table.find_elements(By.TAG_NAME, "tr"):
+                cells = [td.text.strip() for td in tr.find_elements(By.CSS_SELECTOR, "th, td")]
+                if any(cells):
+                    rows.append(cells)
+            if rows:
+                results.append({"table_index": i, "rows": rows})
 
-        if not rows:
-            snippet = re.sub(r"\s+", " ", await page.locator("body").inner_text())[:300]
-            return [empty_row(
-                o_code, o_kw, d_code, d_kw, cargo.capitalize(),
-                "(No charges found)", scraped_at, snippet
-            )]
-        return rows
-    except Exception as e:
-        return [empty_row(
-            o_code, o_kw, d_code, d_kw, cargo.capitalize(),
-            f"(Error: {e})", scraped_at
-        )]
+        # 另外掃一啲常見收費關鍵字
+        page_text = driver.find_element(By.TAG_NAME, "body").text
+        charge_lines = [
+            line.strip()
+            for line in page_text.splitlines()
+            if any(kw in line.lower() for kw in ["fee", "charge", "thc", "b/l", "documentation", "amount", "usd", "aed", "cny"])
+            and len(line.strip()) > 5
+        ]
 
+        output = {
+            "origin": origin,
+            "destination": destination,
+            "cargo_type": cargo_type,
+            "scraped_at": timestamp,
+            "tables": results,
+            "charge_related_lines": charge_lines[:50],  # 最多留 50 行
+        }
 
-async def main():
-    scraped_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    all_rows = []
+        # 輸出 JSON
+        json_path = Path(f"charges_{timestamp}.json")
+        json_path.write_text(json.dumps(output, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"已輸出 JSON → {json_path}")
 
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(
-            headless=True,
-            args=["--disable-blink-features=AutomationControlled"],
-        )
-        context = await browser.new_context(
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/120.0.0.0 Safari/537.36"
-            ),
-            locale="en-US",
-            viewport={"width": 1400, "height": 900},
-        )
-        page = await context.new_page()
+        if charge_lines:
+            print("\n=== 找到嘅收費相關文字（前 15 行）===")
+            for line in charge_lines[:15]:
+                print(" •", line)
 
-        total = len(ORIGINS) * len(DESTINATIONS) * 2
-        done = 0
-        for o_code, o_kw in ORIGINS:
-            for d_code, d_kw in DESTINATIONS:
-                for cargo in ("dry", "reefer"):
-                    done += 1
-                    print(f"[{done}/{total}]")
-                    rows = await scrape_one(page, o_code, o_kw, d_code, d_kw, cargo, scraped_at)
-                    all_rows.extend(rows)
+        return output
 
-        await browser.close()
-
-    df = pd.DataFrame(all_rows)
-    cols = [
-        "OriginCode", "OriginName", "DestCode", "DestName", "CargoType",
-        "ChargeName", "Terminal", "Per20", "Per40", "Per40HC", "RawColumns", "ScrapedAt",
-    ]
-    for c in cols:
-        if c not in df.columns:
-            df[c] = ""
-    df = df[cols]
-
-    day = date.today().isoformat()
-    dated = OUTPUT_DIR / f"esl_charges_{day}.xlsx"
-    latest = OUTPUT_DIR / "esl_charges_latest.xlsx"
-    df.to_excel(dated, index=False)
-    df.to_excel(latest, index=False)
-
-    # 簡單統計
-    real = df[~df["ChargeName"].astype(str).str.startswith("(")]
-    print(f"\n完成: {len(df)} 行 | 有效收費行: {len(real)}")
-    print(f"已儲存: {dated}")
-    print(f"已儲存: {latest}")
+    finally:
+        driver.quit()
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    parser = argparse.ArgumentParser(description="ESL Carrier Charge Finder Scraper")
+    parser.add_argument("--origin", required=True, help="例如: DUBAI, U.A.E. (AEDXB) 或 JEBEL ALI")
+    parser.add_argument("--destination", required=True, help="例如: HONG KONG SAR, CHINA (HKHKG)")
+    parser.add_argument("--cargo", default="dry", choices=["dry", "reefer"])
+    parser.add_argument("--headless", action="store_true", help="無頭模式")
+    args = parser.parse_args()
+
+    scrape_charges(
+        origin=args.origin,
+        destination=args.destination,
+        cargo_type=args.cargo,
+        headless=args.headless,
+    )
